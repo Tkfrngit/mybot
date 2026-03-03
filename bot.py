@@ -1,3 +1,4 @@
+print("🚀 BOT STARTED")
 import time
 import json
 import requests
@@ -113,3 +114,4 @@ while True:
         print("❌ ERROR:", e)
 
     time.sleep(30)
+
