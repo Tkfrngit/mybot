@@ -1,117 +1,86 @@
-print("🚀 BOT STARTED")
 import time
 import json
 import requests
 import numpy as np
+from datetime import datetime
 
 STATE_FILE = "state.json"
 
-print("🚀 BOT STARTED")
+MARKET = "KRW-BTC"
+RSI_PERIOD = 14
 
-
-# =========================
-# 상태 저장 / 로드
-# =========================
 
 def save_state(data):
     with open(STATE_FILE, "w") as f:
         json.dump(data, f)
 
-def load_state():
-    try:
-        with open(STATE_FILE) as f:
-            return json.load(f)
-    except:
-        return {
-            "markets": {},
-            "time": None
-        }
+
+def get_price():
+    url = "https://api.upbit.com/v1/ticker"
+    params = {"markets": MARKET}
+    r = requests.get(url, params=params).json()
+    return r[0]["trade_price"]
 
 
-# =========================
-# RSI 계산
-# =========================
+def get_candles():
+    url = "https://api.upbit.com/v1/candles/minutes/1"
+    params = {"market": MARKET, "count": 200}
+    r = requests.get(url, params=params).json()
+    closes = [c["trade_price"] for c in r]
+    closes.reverse()
+    return closes
+
 
 def calculate_rsi(prices, period=14):
-
     deltas = np.diff(prices)
+    seed = deltas[:period]
 
-    seed = deltas[:period+1]
-
-    up = seed[seed >= 0].sum() / period
+    up = seed[seed > 0].sum() / period
     down = -seed[seed < 0].sum() / period
 
-    if down == 0:
-        return 100
-
-    rs = up / down
-
+    rs = up / down if down != 0 else 0
     rsi = 100 - (100 / (1 + rs))
 
-    return rsi
+    return round(rsi, 2)
 
 
-# =========================
-# 업비트 캔들 가져오기
-# =========================
-
-def get_candles(market):
-
-    url = "https://api.upbit.com/v1/candles/minutes/5"
-
-    params = {
-        "market": market,
-        "count": 50
-    }
-
-    res = requests.get(url, params=params)
-
-    return res.json()
-
-
-# =========================
-# 메인 루프
-# =========================
+print("BOT LOOP START")
 
 while True:
 
-    print("⏱ BOT LOOP START", time.strftime("%H:%M:%S"))
-
     try:
 
-        market = "KRW-BTC"
+        price = get_price()
+        prices = get_candles()
+        rsi = calculate_rsi(prices, RSI_PERIOD)
 
-        candles = get_candles(market)
+        message = "대기중"
 
-        closes = [c["trade_price"] for c in candles]
+        if rsi < 30:
+            message = "매수 신호 (RSI < 30)"
 
-        closes.reverse()
+        elif rsi > 70:
+            message = "매도 신호 (RSI > 70)"
 
-        price = closes[-1]
-
-        rsi = calculate_rsi(closes)
-
-        print("💰 PRICE:", price)
-        print("📊 RSI:", rsi)
-
-        state = load_state()
-
-        state["markets"] = {
-            market: {
-                "price": price,
-                "rsi": round(rsi, 2)
-            }
+        state = {
+            "balance": None,
+            "markets": {
+                MARKET: {
+                    "price": price,
+                    "rsi": rsi
+                }
+            },
+            "message": message,
+            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "total_pnl": None
         }
-
-        state["time"] = time.strftime("%Y-%m-%d %H:%M:%S")
 
         save_state(state)
 
-        print("✅ STATE UPDATED")
+        print("PRICE:", price, "RSI:", rsi)
+
+        time.sleep(10)
 
     except Exception as e:
-
-        print("❌ ERROR:", e)
-
-    time.sleep(30)
-
+        print("ERROR:", e)
+        time.sleep(5)
