@@ -18,7 +18,8 @@ def load_state():
             "time": None,
             "message": "봇 상태 수신 대기중",
             "armed": False,
-            "dry_run": True,
+            "live_trading": False,
+            "can_trade_live": False,
             "balance_error": None,
             "portfolio": None,
             "daily_pnl_est_krw": 0,
@@ -81,9 +82,12 @@ def home():
 
       <p><b>시간:</b> {s.get("time")}</p>
       <p><b>상태:</b> {s.get("message")}</p>
-      <p><b>DRY_RUN:</b> {s.get("dry_run")}</p>
-      <p><b>ARMED:</b> {armed}</p>
+
       <p><b>PAUSED:</b> {paused}</p>
+      <p><b>ARMED:</b> {armed}</p>
+      <p><b>LIVE_TRADING(환경변수):</b> {s.get("live_trading")}</p>
+      <p><b>실거래 가능(can_trade_live):</b> {s.get("can_trade_live")}</p>
+
       <p><b>잔고 조회 에러:</b> {s.get("balance_error")}</p>
 
       <div style="display:flex; gap:8px; flex-wrap:wrap; margin:10px 0;">
