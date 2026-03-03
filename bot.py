@@ -14,21 +14,21 @@ import jwt
 # 설정
 # =========================
 DRY_RUN = True               # ✅ 처음엔 무조건 True
-TOP_N = 5                    # 거래대금 상위 감시 코인 수
-LOOP_SEC = 15                # 루프 주기(초)
+TOP_N = 5
+LOOP_SEC = 15
 
-MAX_POSITIONS = 2            # 동시 보유 코인 수 제한
-KRW_PER_TRADE = 5000         # 코인당 매수 금액(KRW)
-DAILY_LOSS_LIMIT_KRW = 20000 # 하루 손실 한도(추정치) -> 넘으면 자동 일시정지
-MIN_ORDER_KRW = 5000         # 최소 주문 금액(대략)
+MAX_POSITIONS = 2
+KRW_PER_TRADE = 5000
+DAILY_LOSS_LIMIT_KRW = 20000
+MIN_ORDER_KRW = 5000
 
 RSI_PERIOD = 14
 RSI_BUY = 30
 RSI_SELL = 65
 
-STOP_LOSS = 0.02             # -2%
-TAKE_PROFIT = 0.03           # +3%
-TRAIL_GAP = 0.015            # 고점 대비 -1.5%
+STOP_LOSS = 0.02
+TAKE_PROFIT = 0.03
+TRAIL_GAP = 0.015
 
 STATE_FILE = "state.json"
 POSITIONS_FILE = "positions.json"
@@ -144,6 +144,16 @@ def get_candles_1m(market: str, count: int = 200) -> List[float]:
     return closes
 
 
+def get_tickers(markets: List[str]) -> Dict[str, float]:
+    if not markets:
+        return {}
+    data = upbit_public_get("https://api.upbit.com/v1/ticker", params={"markets": ",".join(markets)})
+    out = {}
+    for t in data:
+        out[t["market"]] = float(t["trade_price"])
+    return out
+
+
 # =========================
 # 업비트 Private
 # =========================
@@ -178,23 +188,7 @@ def get_accounts() -> List[dict]:
     return upbit_private_get("/v1/accounts")
 
 
-def get_krw_balance(accounts: List[dict]) -> float:
-    for a in accounts:
-        if a.get("currency") == "KRW":
-            return float(a.get("balance", 0))
-    return 0.0
-
-
-def get_coin_balance(accounts: List[dict], market: str) -> float:
-    coin = market.split("-")[1]
-    for a in accounts:
-        if a.get("currency") == coin:
-            return float(a.get("balance", 0))
-    return 0.0
-
-
 def order_buy_krw(market: str, krw_amount: int) -> dict:
-    # 시장가 매수: ord_type="price" + price=KRW금액
     query = {"market": market, "side": "bid", "price": str(krw_amount), "ord_type": "price"}
     return upbit_private_post("/v1/orders", query)
 
@@ -205,7 +199,7 @@ def order_sell_market(market: str, volume: float) -> dict:
 
 
 # =========================
-# 포지션
+# 포지션 (봇 내부)
 # =========================
 @dataclass
 class Position:
@@ -245,6 +239,92 @@ def write_state(state: Dict[str, Any]) -> None:
 
 
 # =========================
+# 계정 요약 (잔고/평단/평가손익)
+# =========================
+def build_portfolio_view(accounts: List[dict]) -> Dict[str, Any]:
+    """
+    accounts 항목에 보통:
+    - currency, balance, locked, avg_buy_price, unit_currency
+    """
+    portfolio = []
+    markets_for_ticker = []
+
+    krw_balance = 0.0
+
+    for a in accounts:
+        cur = a.get("currency")
+        bal = float(a.get("balance", 0))
+        locked = float(a.get("locked", 0))
+        avg = float(a.get("avg_buy_price", 0) or 0)
+        unit = a.get("unit_currency", "KRW")
+
+        if cur == "KRW":
+            krw_balance = bal
+            continue
+
+        if bal + locked <= 0:
+            continue
+
+        if unit == "KRW":
+            market = f"KRW-{cur}"
+            markets_for_ticker.append(market)
+            portfolio.append({
+                "market": market,
+                "currency": cur,
+                "balance": bal,
+                "locked": locked,
+                "avg_buy_price": avg,
+            })
+
+    prices = get_tickers(markets_for_ticker)
+
+    total_eval = krw_balance
+    total_cost = krw_balance
+    rows = []
+
+    for row in portfolio:
+        m = row["market"]
+        bal = row["balance"]
+        locked = row["locked"]
+        qty = bal + locked
+        avg = row["avg_buy_price"]
+        price = prices.get(m)
+
+        if price is None:
+            eval_krw = None
+            pnl_krw = None
+            pnl_rate = None
+        else:
+            eval_krw = qty * price
+            cost = qty * avg if avg > 0 else 0
+            pnl_krw = eval_krw - cost
+            pnl_rate = (pnl_krw / cost * 100) if cost > 0 else None
+
+            total_eval += eval_krw
+            total_cost += cost
+
+        rows.append({
+            "market": m,
+            "qty": round(qty, 8),
+            "avg_buy_price": round(avg, 2),
+            "price": None if price is None else round(price, 2),
+            "eval_krw": None if eval_krw is None else round(eval_krw, 0),
+            "pnl_krw": None if pnl_krw is None else round(pnl_krw, 0),
+            "pnl_rate": None if pnl_rate is None else round(pnl_rate, 2),
+        })
+
+    total_pnl = total_eval - total_cost
+
+    return {
+        "krw_balance": round(krw_balance, 0),
+        "portfolio": rows,
+        "total_eval_krw": round(total_eval, 0),
+        "total_cost_krw": round(total_cost, 0),
+        "total_pnl_krw": round(total_pnl, 0),
+    }
+
+
+# =========================
 # 메인
 # =========================
 def main():
@@ -253,73 +333,75 @@ def main():
 
     positions = load_positions()
 
-    daily_pnl = 0.0
+    daily_pnl_est = 0.0
     day_key = time.strftime("%Y-%m-%d")
 
     while True:
         try:
-            # 날짜 바뀌면 리셋(추정 손익)
             if time.strftime("%Y-%m-%d") != day_key:
                 day_key = time.strftime("%Y-%m-%d")
-                daily_pnl = 0.0
+                daily_pnl_est = 0.0
 
-            # ===== 잔고 조회는 DRY_RUN이어도 항상 시도 =====
+            # 계좌 조회(항상 시도) + 에러 저장
             accounts = None
-            balance_krw = None
             balance_error = None
+            portfolio_view = None
 
             if ACCESS and SECRET:
                 try:
                     accounts = get_accounts()
-                    balance_krw = get_krw_balance(accounts)
+                    portfolio_view = build_portfolio_view(accounts)
                 except Exception as e:
                     balance_error = str(e)
             else:
                 balance_error = "UPBIT_ACCESS/UPBIT_SECRET 환경변수가 없어요"
 
-            # ===== 일시정지 =====
             if is_paused():
                 write_state({
                     "time": now_str(),
                     "message": "⏸ 일시정지 중",
                     "armed": is_armed(),
                     "dry_run": DRY_RUN,
-                    "balance_krw": None if balance_krw is None else round(balance_krw, 0),
                     "balance_error": balance_error,
-                    "total_pnl_krw": round(daily_pnl, 0),
+                    "portfolio": portfolio_view,
+                    "daily_pnl_est_krw": round(daily_pnl_est, 0),
                     "markets": {},
                     "positions": {m: p.as_dict() for m, p in positions.items()},
                 })
                 time.sleep(3)
                 continue
 
-            # ===== 일일 손실 한도 =====
-            if daily_pnl <= -abs(DAILY_LOSS_LIMIT_KRW):
+            if daily_pnl_est <= -abs(DAILY_LOSS_LIMIT_KRW):
                 if not os.path.exists(PAUSE_FILE):
                     open(PAUSE_FILE, "w").close()
-                telegram(f"⛔ 일일 손실 한도 초과로 자동 일시정지: {daily_pnl:.0f} KRW")
+                telegram(f"⛔ 일일 손실 한도 초과로 자동 일시정지: {daily_pnl_est:.0f} KRW")
                 continue
 
-            # ===== 강제청산 =====
+            # 강제청산
             if os.path.exists(FORCE_FILE):
                 telegram("🔴 강제청산 요청")
                 if (not DRY_RUN) and is_armed() and accounts:
-                    for m, p in list(positions.items()):
-                        vol = get_coin_balance(accounts, m)
+                    # 봇이 추적하는 포지션들만 청산 (계정 전체 청산은 위험해서 안 함)
+                    for m in list(positions.keys()):
+                        coin = m.split("-")[1]
+                        vol = 0.0
+                        for a in accounts:
+                            if a.get("currency") == coin:
+                                vol = float(a.get("balance", 0))
+                                break
                         if vol > 0:
                             order_sell_market(m, vol)
                         positions.pop(m, None)
                     save_positions(positions)
                 else:
-                    # DRY_RUN이면 그냥 포지션 제거(가상)
                     positions.clear()
                     save_positions(positions)
                 clear_force_flag()
 
-            markets = get_top_krw_markets(TOP_N)
+            watch_markets = get_top_krw_markets(TOP_N)
             market_view: Dict[str, Any] = {}
 
-            # ===== 1) 포지션 관리 =====
+            # 1) 포지션 관리
             for m in list(positions.keys()):
                 closes = get_candles_1m(m, 200)
                 price = float(closes[-1])
@@ -343,7 +425,7 @@ def main():
                     sell_reason = f"RSI 매도 {r:.1f}"
 
                 market_view[m] = {
-                    "price": price,
+                    "price": round(price, 2),
                     "rsi": round(r, 2),
                     "bb_upper": round(upper, 2),
                     "bb_mid": round(mid, 2),
@@ -359,23 +441,28 @@ def main():
                 if sell_reason:
                     telegram(f"🔻 매도 {m} | {sell_reason}")
                     if DRY_RUN or (not is_armed()):
-                        daily_pnl += pnl_rate * KRW_PER_TRADE
+                        daily_pnl_est += pnl_rate * KRW_PER_TRADE
                         positions.pop(m, None)
                         save_positions(positions)
                     else:
-                        # 실매매: 실제 잔고 기준
+                        # 실제 잔고 기반 매도
                         if accounts is None:
                             accounts = get_accounts()
-                        vol = get_coin_balance(accounts, m)
+                        coin = m.split("-")[1]
+                        vol = 0.0
+                        for a in accounts:
+                            if a.get("currency") == coin:
+                                vol = float(a.get("balance", 0))
+                                break
                         if vol > 0:
                             order_sell_market(m, vol)
-                        daily_pnl += pnl_rate * KRW_PER_TRADE
+                        daily_pnl_est += pnl_rate * KRW_PER_TRADE
                         positions.pop(m, None)
                         save_positions(positions)
 
-            # ===== 2) 신규 진입 =====
+            # 2) 신규 진입
             if len(positions) < MAX_POSITIONS:
-                for m in markets:
+                for m in watch_markets:
                     if m in positions:
                         continue
                     if len(positions) >= MAX_POSITIONS:
@@ -392,7 +479,7 @@ def main():
 
                     market_view.setdefault(m, {})
                     market_view[m].update({
-                        "price": price,
+                        "price": round(price, 2),
                         "rsi": round(r, 2),
                         "bb_upper": round(upper, 2),
                         "bb_mid": round(mid, 2),
@@ -404,6 +491,7 @@ def main():
 
                     if r < RSI_BUY and near_lower and trend_ok:
                         telegram(f"🟢 매수 시도 {m} | rsi={r:.1f}")
+
                         if DRY_RUN or (not is_armed()):
                             fake_vol = KRW_PER_TRADE / price
                             positions[m] = Position(m, price, fake_vol, price, now_str())
@@ -411,34 +499,35 @@ def main():
                         else:
                             if accounts is None:
                                 accounts = get_accounts()
-                                balance_krw = get_krw_balance(accounts)
+                                portfolio_view = build_portfolio_view(accounts)
+                            krw_bal = (portfolio_view or {}).get("krw_balance", 0) if portfolio_view else 0
 
-                            if (balance_krw or 0) >= max(MIN_ORDER_KRW, KRW_PER_TRADE):
+                            if krw_bal >= max(MIN_ORDER_KRW, KRW_PER_TRADE):
                                 order_buy_krw(m, KRW_PER_TRADE)
                                 time.sleep(1.0)
                                 accounts = get_accounts()
-                                vol = get_coin_balance(accounts, m)
+                                # 실제 수량 추정(정확한 체결 반영은 더 고급 기능)
                                 positions[m] = Position(
                                     market=m,
                                     entry_price=price,
-                                    volume=vol if vol > 0 else (KRW_PER_TRADE / price),
+                                    volume=KRW_PER_TRADE / price,
                                     peak_price=price,
                                     entry_time=now_str(),
                                 )
                                 save_positions(positions)
                             else:
-                                telegram(f"⚠️ KRW 잔고 부족: {(balance_krw or 0):.0f} KRW")
+                                telegram(f"⚠️ KRW 잔고 부족: {krw_bal:.0f} KRW")
                                 market_view[m]["note"] = "KRW 부족"
 
-            # ===== state 저장(대시보드용) =====
+            # state 저장
             write_state({
                 "time": now_str(),
                 "message": "✅ 실행중",
                 "armed": is_armed(),
                 "dry_run": DRY_RUN,
-                "balance_krw": None if balance_krw is None else round(balance_krw, 0),
                 "balance_error": balance_error,
-                "total_pnl_krw": round(daily_pnl, 0),
+                "portfolio": portfolio_view,
+                "daily_pnl_est_krw": round(daily_pnl_est, 0),
                 "markets": market_view,
                 "positions": {m: p.as_dict() for m, p in positions.items()},
             })
@@ -454,9 +543,9 @@ def main():
                 "message": err,
                 "armed": is_armed(),
                 "dry_run": DRY_RUN,
-                "balance_krw": None,
                 "balance_error": str(e),
-                "total_pnl_krw": None,
+                "portfolio": None,
+                "daily_pnl_est_krw": None,
                 "markets": {},
                 "positions": {m: p.as_dict() for m, p in positions.items()},
             })
