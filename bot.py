@@ -11,9 +11,8 @@ import numpy as np
 import jwt
 
 # =========================
-# 설정
+# 운영 설정
 # =========================
-DRY_RUN = True               # ✅ 처음엔 무조건 True
 TOP_N = 5
 LOOP_SEC = 15
 
@@ -39,6 +38,9 @@ FORCE_FILE = "force_sell.flag"
 
 ACCESS = os.getenv("UPBIT_ACCESS", "").strip()
 SECRET = os.getenv("UPBIT_SECRET", "").strip()
+
+# ✅ 실거래 스위치 (Railway Variables에서 LIVE_TRADING=1 일 때만 True)
+LIVE_TRADING = os.getenv("LIVE_TRADING", "0").strip() in ("1", "true", "True", "YES", "yes")
 
 TG_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 TG_CHAT = os.getenv("TELEGRAM_CHAT_ID", "").strip()
@@ -89,6 +91,16 @@ def is_paused() -> bool:
 def clear_force_flag():
     if os.path.exists(FORCE_FILE):
         os.remove(FORCE_FILE)
+
+
+def can_trade_live() -> bool:
+    """
+    ✅ 실거래 주문이 나가려면:
+    1) LIVE_TRADING=1
+    2) 대시보드에서 Arm(armed.flag 생성)
+    3) UPBIT_ACCESS/UPBIT_SECRET 존재
+    """
+    return LIVE_TRADING and is_armed() and bool(ACCESS) and bool(SECRET)
 
 
 # =========================
@@ -148,10 +160,7 @@ def get_tickers(markets: List[str]) -> Dict[str, float]:
     if not markets:
         return {}
     data = upbit_public_get("https://api.upbit.com/v1/ticker", params={"markets": ",".join(markets)})
-    out = {}
-    for t in data:
-        out[t["market"]] = float(t["trade_price"])
-    return out
+    return {t["market"]: float(t["trade_price"]) for t in data}
 
 
 # =========================
@@ -199,7 +208,7 @@ def order_sell_market(market: str, volume: float) -> dict:
 
 
 # =========================
-# 포지션 (봇 내부)
+# 포지션
 # =========================
 @dataclass
 class Position:
@@ -239,16 +248,11 @@ def write_state(state: Dict[str, Any]) -> None:
 
 
 # =========================
-# 계정 요약 (잔고/평단/평가손익)
+# 포트폴리오 요약
 # =========================
 def build_portfolio_view(accounts: List[dict]) -> Dict[str, Any]:
-    """
-    accounts 항목에 보통:
-    - currency, balance, locked, avg_buy_price, unit_currency
-    """
     portfolio = []
     markets_for_ticker = []
-
     krw_balance = 0.0
 
     for a in accounts:
@@ -284,32 +288,30 @@ def build_portfolio_view(accounts: List[dict]) -> Dict[str, Any]:
 
     for row in portfolio:
         m = row["market"]
-        bal = row["balance"]
-        locked = row["locked"]
-        qty = bal + locked
+        qty = row["balance"] + row["locked"]
         avg = row["avg_buy_price"]
         price = prices.get(m)
 
         if price is None:
-            eval_krw = None
-            pnl_krw = None
-            pnl_rate = None
-        else:
-            eval_krw = qty * price
-            cost = qty * avg if avg > 0 else 0
-            pnl_krw = eval_krw - cost
-            pnl_rate = (pnl_krw / cost * 100) if cost > 0 else None
+            rows.append({"market": m, "qty": round(qty, 8), "avg_buy_price": round(avg, 2),
+                         "price": None, "eval_krw": None, "pnl_krw": None, "pnl_rate": None})
+            continue
 
-            total_eval += eval_krw
-            total_cost += cost
+        eval_krw = qty * price
+        cost = qty * avg if avg > 0 else 0
+        pnl_krw = eval_krw - cost
+        pnl_rate = (pnl_krw / cost * 100) if cost > 0 else None
+
+        total_eval += eval_krw
+        total_cost += cost
 
         rows.append({
             "market": m,
             "qty": round(qty, 8),
             "avg_buy_price": round(avg, 2),
-            "price": None if price is None else round(price, 2),
-            "eval_krw": None if eval_krw is None else round(eval_krw, 0),
-            "pnl_krw": None if pnl_krw is None else round(pnl_krw, 0),
+            "price": round(price, 2),
+            "eval_krw": round(eval_krw, 0),
+            "pnl_krw": round(pnl_krw, 0),
             "pnl_rate": None if pnl_rate is None else round(pnl_rate, 2),
         })
 
@@ -329,7 +331,7 @@ def build_portfolio_view(accounts: List[dict]) -> Dict[str, Any]:
 # =========================
 def main():
     print("🚀 BOT STARTED", now_str())
-    telegram("🚀 봇 시작")
+    telegram(f"🚀 봇 시작 | LIVE_TRADING={LIVE_TRADING}")
 
     positions = load_positions()
 
@@ -342,7 +344,6 @@ def main():
                 day_key = time.strftime("%Y-%m-%d")
                 daily_pnl_est = 0.0
 
-            # 계좌 조회(항상 시도) + 에러 저장
             accounts = None
             balance_error = None
             portfolio_view = None
@@ -361,7 +362,8 @@ def main():
                     "time": now_str(),
                     "message": "⏸ 일시정지 중",
                     "armed": is_armed(),
-                    "dry_run": DRY_RUN,
+                    "live_trading": LIVE_TRADING,
+                    "can_trade_live": can_trade_live(),
                     "balance_error": balance_error,
                     "portfolio": portfolio_view,
                     "daily_pnl_est_krw": round(daily_pnl_est, 0),
@@ -380,8 +382,7 @@ def main():
             # 강제청산
             if os.path.exists(FORCE_FILE):
                 telegram("🔴 강제청산 요청")
-                if (not DRY_RUN) and is_armed() and accounts:
-                    # 봇이 추적하는 포지션들만 청산 (계정 전체 청산은 위험해서 안 함)
+                if can_trade_live() and accounts:
                     for m in list(positions.keys()):
                         coin = m.split("-")[1]
                         vol = 0.0
@@ -401,7 +402,7 @@ def main():
             watch_markets = get_top_krw_markets(TOP_N)
             market_view: Dict[str, Any] = {}
 
-            # 1) 포지션 관리
+            # 1) 보유 포지션 관리
             for m in list(positions.keys()):
                 closes = get_candles_1m(m, 200)
                 price = float(closes[-1])
@@ -440,12 +441,11 @@ def main():
 
                 if sell_reason:
                     telegram(f"🔻 매도 {m} | {sell_reason}")
-                    if DRY_RUN or (not is_armed()):
+                    if not can_trade_live():
                         daily_pnl_est += pnl_rate * KRW_PER_TRADE
                         positions.pop(m, None)
                         save_positions(positions)
                     else:
-                        # 실제 잔고 기반 매도
                         if accounts is None:
                             accounts = get_accounts()
                         coin = m.split("-")[1]
@@ -491,12 +491,12 @@ def main():
 
                     if r < RSI_BUY and near_lower and trend_ok:
                         telegram(f"🟢 매수 시도 {m} | rsi={r:.1f}")
-
-                        if DRY_RUN or (not is_armed()):
+                        if not can_trade_live():
                             fake_vol = KRW_PER_TRADE / price
                             positions[m] = Position(m, price, fake_vol, price, now_str())
                             save_positions(positions)
                         else:
+                            # 실거래: KRW 잔고 체크
                             if accounts is None:
                                 accounts = get_accounts()
                                 portfolio_view = build_portfolio_view(accounts)
@@ -505,8 +505,7 @@ def main():
                             if krw_bal >= max(MIN_ORDER_KRW, KRW_PER_TRADE):
                                 order_buy_krw(m, KRW_PER_TRADE)
                                 time.sleep(1.0)
-                                accounts = get_accounts()
-                                # 실제 수량 추정(정확한 체결 반영은 더 고급 기능)
+                                # 체결 수량 정확화는 고급 기능(주문 조회/체결 조회)에서 처리 가능
                                 positions[m] = Position(
                                     market=m,
                                     entry_price=price,
@@ -519,12 +518,12 @@ def main():
                                 telegram(f"⚠️ KRW 잔고 부족: {krw_bal:.0f} KRW")
                                 market_view[m]["note"] = "KRW 부족"
 
-            # state 저장
             write_state({
                 "time": now_str(),
                 "message": "✅ 실행중",
                 "armed": is_armed(),
-                "dry_run": DRY_RUN,
+                "live_trading": LIVE_TRADING,
+                "can_trade_live": can_trade_live(),
                 "balance_error": balance_error,
                 "portfolio": portfolio_view,
                 "daily_pnl_est_krw": round(daily_pnl_est, 0),
@@ -542,7 +541,8 @@ def main():
                 "time": now_str(),
                 "message": err,
                 "armed": is_armed(),
-                "dry_run": DRY_RUN,
+                "live_trading": LIVE_TRADING,
+                "can_trade_live": can_trade_live(),
                 "balance_error": str(e),
                 "portfolio": None,
                 "daily_pnl_est_krw": None,
