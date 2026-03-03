@@ -315,10 +315,18 @@ def main():
 
             # 계좌 조회(실매매 모드에서만)
             accounts = None
-            balance_krw = None
-            if (not DRY_RUN) and is_armed() and ACCESS and SECRET:
-                accounts = get_accounts()
-                balance_krw = get_krw_balance(accounts)
+balance_krw = None
+balance_error = None
+
+# ✅ DRY_RUN이어도 '조회'는 항상 시도 (주문은 DRY_RUN/ARM에서만 막힘)
+if ACCESS and SECRET:
+    try:
+        accounts = get_accounts()
+        balance_krw = get_krw_balance(accounts)
+    except Exception as e:
+        balance_error = str(e)
+else:
+    balance_error = "UPBIT_ACCESS/UPBIT_SECRET 환경변수가 없어요"
 
             # 1) 포지션 관리(손절/익절/트레일/RSI 매도)
             for m in list(positions.keys()):
@@ -488,3 +496,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
