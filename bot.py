@@ -11,39 +11,35 @@ import numpy as np
 import jwt
 
 # =========================
-# 실전 안전 설정
+# 설정
 # =========================
 DRY_RUN = True               # ✅ 처음엔 무조건 True
-TOP_N = 5                    # 거래대금 상위 몇 개 감시
-LOOP_SEC = 15                # 루프 주기(초) - 너무 짧게 하면 API 제한 걸림
+TOP_N = 5                    # 거래대금 상위 감시 코인 수
+LOOP_SEC = 15                # 루프 주기(초)
 
-# 포지션/리스크
-MAX_POSITIONS = 2            # 동시에 최대 보유 코인 수
+MAX_POSITIONS = 2            # 동시 보유 코인 수 제한
 KRW_PER_TRADE = 5000         # 코인당 매수 금액(KRW)
-DAILY_LOSS_LIMIT_KRW = 20000 # 하루 손실 한도(넘으면 자동 일시정지)
-MIN_ORDER_KRW = 5000         # 업비트 최소주문(대략 5,000원)
+DAILY_LOSS_LIMIT_KRW = 20000 # 하루 손실 한도(추정치) -> 넘으면 자동 일시정지
+MIN_ORDER_KRW = 5000         # 최소 주문 금액(대략)
 
-# 전략 파라미터
 RSI_PERIOD = 14
 RSI_BUY = 30
 RSI_SELL = 65
 
-STOP_LOSS = 0.02             # -2% 손절
-TAKE_PROFIT = 0.03           # +3% 익절
-TRAIL_GAP = 0.015            # 고점 대비 1.5% 하락 시 트레일 청산
+STOP_LOSS = 0.02             # -2%
+TAKE_PROFIT = 0.03           # +3%
+TRAIL_GAP = 0.015            # 고점 대비 -1.5%
 
-# 파일 플래그(대시보드 버튼과 연동)
 STATE_FILE = "state.json"
 POSITIONS_FILE = "positions.json"
+
 ARM_FILE = "armed.flag"
 PAUSE_FILE = "pause.flag"
-FORCE_FILE = "force_sell.flag"   # 전부 청산
+FORCE_FILE = "force_sell.flag"
 
-# Upbit keys (Railway Variables)
 ACCESS = os.getenv("UPBIT_ACCESS", "").strip()
 SECRET = os.getenv("UPBIT_SECRET", "").strip()
 
-# Telegram (optional)
 TG_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 TG_CHAT = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 
@@ -95,8 +91,10 @@ def clear_force_flag():
         os.remove(FORCE_FILE)
 
 
+# =========================
+# 지표
+# =========================
 def rsi(prices: List[float], period: int = 14) -> float:
-    # Wilder RSI (간단 버전)
     if len(prices) < period + 1:
         return 50.0
     deltas = np.diff(prices)
@@ -110,23 +108,20 @@ def rsi(prices: List[float], period: int = 14) -> float:
 
 
 def bollinger(prices: List[float], period: int = 20) -> Tuple[float, float, float]:
-    if len(prices) < period:
-        p = prices
-    else:
-        p = prices[-period:]
+    p = prices[-period:] if len(prices) >= period else prices
     ma = float(np.mean(p))
     std = float(np.std(p))
-    upper = ma + 2 * std
-    lower = ma - 2 * std
-    return upper, ma, lower
+    return ma + 2 * std, ma, ma - 2 * std
 
 
 def sma(prices: List[float], period: int = 50) -> float:
-    if len(prices) < period:
-        return float(np.mean(prices))
-    return float(np.mean(prices[-period:]))
+    p = prices[-period:] if len(prices) >= period else prices
+    return float(np.mean(p))
 
 
+# =========================
+# 업비트 Public
+# =========================
 def upbit_public_get(url: str, params: Optional[dict] = None):
     return SESSION.get(url, params=params, timeout=10).json()
 
@@ -134,7 +129,6 @@ def upbit_public_get(url: str, params: Optional[dict] = None):
 def get_top_krw_markets(top_n: int) -> List[str]:
     markets = upbit_public_get("https://api.upbit.com/v1/market/all", params={"isDetails": "false"})
     krw = [m["market"] for m in markets if m["market"].startswith("KRW-")]
-    # ticker는 한 번에 여러개 가능
     tickers = upbit_public_get("https://api.upbit.com/v1/ticker", params={"markets": ",".join(krw)})
     tickers.sort(key=lambda x: x.get("acc_trade_price_24h", 0), reverse=True)
     return [t["market"] for t in tickers[:top_n]]
@@ -150,9 +144,12 @@ def get_candles_1m(market: str, count: int = 200) -> List[float]:
     return closes
 
 
+# =========================
+# 업비트 Private
+# =========================
 def make_auth_headers(query: Optional[dict] = None) -> dict:
     if not ACCESS or not SECRET:
-        raise RuntimeError("UPBIT_ACCESS/UPBIT_SECRET 설정이 필요합니다.")
+        raise RuntimeError("UPBIT_ACCESS/UPBIT_SECRET 환경변수가 없어요.")
 
     payload = {"access_key": ACCESS, "nonce": str(uuid.uuid4())}
 
@@ -189,7 +186,6 @@ def get_krw_balance(accounts: List[dict]) -> float:
 
 
 def get_coin_balance(accounts: List[dict], market: str) -> float:
-    # market: KRW-BTC -> BTC
     coin = market.split("-")[1]
     for a in accounts:
         if a.get("currency") == coin:
@@ -198,26 +194,19 @@ def get_coin_balance(accounts: List[dict], market: str) -> float:
 
 
 def order_buy_krw(market: str, krw_amount: int) -> dict:
-    # 업비트: 시장가 매수는 ord_type="price", price에 KRW 금액 입력
-    query = {
-        "market": market,
-        "side": "bid",
-        "price": str(krw_amount),
-        "ord_type": "price",
-    }
+    # 시장가 매수: ord_type="price" + price=KRW금액
+    query = {"market": market, "side": "bid", "price": str(krw_amount), "ord_type": "price"}
     return upbit_private_post("/v1/orders", query)
 
 
 def order_sell_market(market: str, volume: float) -> dict:
-    query = {
-        "market": market,
-        "side": "ask",
-        "volume": str(volume),
-        "ord_type": "market",
-    }
+    query = {"market": market, "side": "ask", "volume": str(volume), "ord_type": "market"}
     return upbit_private_post("/v1/orders", query)
 
 
+# =========================
+# 포지션
+# =========================
 @dataclass
 class Position:
     market: str
@@ -248,38 +237,55 @@ def load_positions() -> Dict[str, Position]:
 
 
 def save_positions(pos: Dict[str, Position]) -> None:
-    raw = {m: p.as_dict() for m, p in pos.items()}
-    save_json(POSITIONS_FILE, raw)
+    save_json(POSITIONS_FILE, {m: p.as_dict() for m, p in pos.items()})
 
 
 def write_state(state: Dict[str, Any]) -> None:
     save_json(STATE_FILE, state)
 
 
+# =========================
+# 메인
+# =========================
 def main():
     print("🚀 BOT STARTED", now_str())
     telegram("🚀 봇 시작")
 
     positions = load_positions()
 
-    # 일일 손익(간단 구현): 봇 재시작하면 초기화됨
     daily_pnl = 0.0
     day_key = time.strftime("%Y-%m-%d")
 
     while True:
         try:
-            # 날짜 바뀌면 리셋
+            # 날짜 바뀌면 리셋(추정 손익)
             if time.strftime("%Y-%m-%d") != day_key:
                 day_key = time.strftime("%Y-%m-%d")
                 daily_pnl = 0.0
 
+            # ===== 잔고 조회는 DRY_RUN이어도 항상 시도 =====
+            accounts = None
+            balance_krw = None
+            balance_error = None
+
+            if ACCESS and SECRET:
+                try:
+                    accounts = get_accounts()
+                    balance_krw = get_krw_balance(accounts)
+                except Exception as e:
+                    balance_error = str(e)
+            else:
+                balance_error = "UPBIT_ACCESS/UPBIT_SECRET 환경변수가 없어요"
+
+            # ===== 일시정지 =====
             if is_paused():
                 write_state({
                     "time": now_str(),
                     "message": "⏸ 일시정지 중",
                     "armed": is_armed(),
                     "dry_run": DRY_RUN,
-                    "balance_krw": None,
+                    "balance_krw": None if balance_krw is None else round(balance_krw, 0),
+                    "balance_error": balance_error,
                     "total_pnl_krw": round(daily_pnl, 0),
                     "markets": {},
                     "positions": {m: p.as_dict() for m, p in positions.items()},
@@ -287,48 +293,33 @@ def main():
                 time.sleep(3)
                 continue
 
-            # 강제 청산
-            if os.path.exists(FORCE_FILE):
-                msg = "🔴 강제청산 요청"
-                print(msg)
-                telegram(msg)
-                if not DRY_RUN and is_armed() and ACCESS and SECRET:
-                    ac = get_accounts()
-                    for m, p in list(positions.items()):
-                        vol = get_coin_balance(ac, m)
-                        if vol > 0:
-                            order_sell_market(m, vol)
-                        positions.pop(m, None)
-                    save_positions(positions)
-                clear_force_flag()
-
-            # 일일 손실 한도 초과 시 자동 pause
+            # ===== 일일 손실 한도 =====
             if daily_pnl <= -abs(DAILY_LOSS_LIMIT_KRW):
                 if not os.path.exists(PAUSE_FILE):
                     open(PAUSE_FILE, "w").close()
                 telegram(f"⛔ 일일 손실 한도 초과로 자동 일시정지: {daily_pnl:.0f} KRW")
                 continue
 
-            markets = get_top_krw_markets(TOP_N)
+            # ===== 강제청산 =====
+            if os.path.exists(FORCE_FILE):
+                telegram("🔴 강제청산 요청")
+                if (not DRY_RUN) and is_armed() and accounts:
+                    for m, p in list(positions.items()):
+                        vol = get_coin_balance(accounts, m)
+                        if vol > 0:
+                            order_sell_market(m, vol)
+                        positions.pop(m, None)
+                    save_positions(positions)
+                else:
+                    # DRY_RUN이면 그냥 포지션 제거(가상)
+                    positions.clear()
+                    save_positions(positions)
+                clear_force_flag()
 
+            markets = get_top_krw_markets(TOP_N)
             market_view: Dict[str, Any] = {}
 
-            # 계좌 조회(실매매 모드에서만)
-            accounts = None
-balance_krw = None
-balance_error = None
-
-# ✅ DRY_RUN이어도 '조회'는 항상 시도 (주문은 DRY_RUN/ARM에서만 막힘)
-if ACCESS and SECRET:
-    try:
-        accounts = get_accounts()
-        balance_krw = get_krw_balance(accounts)
-    except Exception as e:
-        balance_error = str(e)
-else:
-    balance_error = "UPBIT_ACCESS/UPBIT_SECRET 환경변수가 없어요"
-
-            # 1) 포지션 관리(손절/익절/트레일/RSI 매도)
+            # ===== 1) 포지션 관리 =====
             for m in list(positions.keys()):
                 closes = get_candles_1m(m, 200)
                 price = float(closes[-1])
@@ -366,17 +357,13 @@ else:
                 }
 
                 if sell_reason:
-                    msg = f"🔻 매도 시도 {m} | {sell_reason} | entry={p.entry_price:.0f} now={price:.0f}"
-                    print(msg)
-                    telegram(msg)
-
-                    if DRY_RUN or (not is_armed()) or (not ACCESS) or (not SECRET):
-                        # 드라이런: 가상청산 처리
+                    telegram(f"🔻 매도 {m} | {sell_reason}")
+                    if DRY_RUN or (not is_armed()):
                         daily_pnl += pnl_rate * KRW_PER_TRADE
                         positions.pop(m, None)
                         save_positions(positions)
                     else:
-                        # 실매매: 실제 잔고 기준 매도
+                        # 실매매: 실제 잔고 기준
                         if accounts is None:
                             accounts = get_accounts()
                         vol = get_coin_balance(accounts, m)
@@ -386,9 +373,8 @@ else:
                         positions.pop(m, None)
                         save_positions(positions)
 
-            # 2) 신규 진입(매수)
-            open_count = len(positions)
-            if open_count < MAX_POSITIONS:
+            # ===== 2) 신규 진입 =====
+            if len(positions) < MAX_POSITIONS:
                 for m in markets:
                     if m in positions:
                         continue
@@ -401,10 +387,6 @@ else:
                     upper, mid, lower = bollinger(closes, 20)
                     trend = sma(closes, 50)
 
-                    # “실전형” 진입 필터(너무 무리하지 않게):
-                    #  - RSI 낮음
-                    #  - 가격이 볼밴 하단 근처
-                    #  - SMA50 위면(상승 추세) or 거의 근처(과도한 역추세 진입 방지)
                     near_lower = price <= lower * 1.01
                     trend_ok = price >= trend * 0.98
 
@@ -421,32 +403,18 @@ else:
                     })
 
                     if r < RSI_BUY and near_lower and trend_ok:
-                        msg = f"🟢 매수 시도 {m} | rsi={r:.1f} price={price:.0f}"
-                        print(msg)
-                        telegram(msg)
-
-                        if DRY_RUN or (not is_armed()) or (not ACCESS) or (not SECRET):
-                            # 드라이런: 가상진입(수량은 표시용)
+                        telegram(f"🟢 매수 시도 {m} | rsi={r:.1f}")
+                        if DRY_RUN or (not is_armed()):
                             fake_vol = KRW_PER_TRADE / price
-                            positions[m] = Position(
-                                market=m,
-                                entry_price=price,
-                                volume=fake_vol,
-                                peak_price=price,
-                                entry_time=now_str(),
-                            )
+                            positions[m] = Position(m, price, fake_vol, price, now_str())
                             save_positions(positions)
                         else:
-                            # 실매매: KRW 잔고 체크
                             if accounts is None:
                                 accounts = get_accounts()
                                 balance_krw = get_krw_balance(accounts)
-                            if balance_krw is None:
-                                balance_krw = 0.0
 
-                            if balance_krw >= max(MIN_ORDER_KRW, KRW_PER_TRADE):
+                            if (balance_krw or 0) >= max(MIN_ORDER_KRW, KRW_PER_TRADE):
                                 order_buy_krw(m, KRW_PER_TRADE)
-                                # 매수 후 계좌 다시 조회해서 수량 확보
                                 time.sleep(1.0)
                                 accounts = get_accounts()
                                 vol = get_coin_balance(accounts, m)
@@ -459,16 +427,17 @@ else:
                                 )
                                 save_positions(positions)
                             else:
-                                telegram(f"⚠️ KRW 잔고 부족: {balance_krw:.0f} KRW")
+                                telegram(f"⚠️ KRW 잔고 부족: {(balance_krw or 0):.0f} KRW")
                                 market_view[m]["note"] = "KRW 부족"
 
-            # 상태 저장 (대시보드용)
+            # ===== state 저장(대시보드용) =====
             write_state({
                 "time": now_str(),
-                "message": "✅ 실행중" if not is_paused() else "⏸ 일시정지",
+                "message": "✅ 실행중",
                 "armed": is_armed(),
                 "dry_run": DRY_RUN,
                 "balance_krw": None if balance_krw is None else round(balance_krw, 0),
+                "balance_error": balance_error,
                 "total_pnl_krw": round(daily_pnl, 0),
                 "markets": market_view,
                 "positions": {m: p.as_dict() for m, p in positions.items()},
@@ -477,7 +446,6 @@ else:
             time.sleep(LOOP_SEC)
 
         except Exception as e:
-            # 죽지 않게 유지
             err = f"❌ 봇 에러: {e}"
             print(err)
             telegram(err)
@@ -487,6 +455,7 @@ else:
                 "armed": is_armed(),
                 "dry_run": DRY_RUN,
                 "balance_krw": None,
+                "balance_error": str(e),
                 "total_pnl_krw": None,
                 "markets": {},
                 "positions": {m: p.as_dict() for m, p in positions.items()},
@@ -496,4 +465,3 @@ else:
 
 if __name__ == "__main__":
     main()
-
