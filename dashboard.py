@@ -20,6 +20,7 @@ def load_state():
             "armed": False,
             "dry_run": True,
             "balance_krw": None,
+            "balance_error": None,
             "total_pnl_krw": 0,
             "markets": {},
             "positions": {}
@@ -50,6 +51,7 @@ def home():
 
       <p><b>시간:</b> {s.get("time")}</p>
       <p><b>상태:</b> {s.get("message")}</p>
+
       <p><b>DRY_RUN:</b> {s.get("dry_run")}</p>
       <p><b>ARMED(실매매 승인):</b> {armed}</p>
       <p><b>일시정지:</b> {paused}</p>
@@ -59,15 +61,16 @@ def home():
       <div style="display:flex; gap:8px; flex-wrap:wrap;">
         <a href="/pause"><button style="padding:8px 12px;">⏸ Pause</button></a>
         <a href="/resume"><button style="padding:8px 12px;">▶ Resume</button></a>
-        <a href="/arm"><button style="padding:8px 12px; background:crimson; color:white;">✅ Arm (실매매 승인)</button></a>
+        <a href="/arm"><button style="padding:8px 12px; background:crimson; color:white;">✅ Arm</button></a>
         <a href="/disarm"><button style="padding:8px 12px;">🧪 Disarm</button></a>
         <a href="/force"><button style="padding:8px 12px; background:red; color:white;">🔴 Force Sell All</button></a>
       </div>
 
       <hr/>
 
-      <h2>💰 요약</h2>
+      <h2>💰 잔고/손익</h2>
       <p><b>KRW 잔고:</b> {s.get("balance_krw")}</p>
+      <p><b>잔고 조회 에러:</b> {s.get("balance_error")}</p>
       <p><b>오늘 손익(추정):</b> {s.get("total_pnl_krw")}</p>
 
       <hr/>
@@ -125,14 +128,11 @@ def force():
 
 
 def start_bot():
-    # 봇을 같은 컨테이너에서 실행 (현재 너 상황에 가장 안정적인 방식)
     print("BOT STARTING...")
     subprocess.Popen(["python", "bot.py"])
 
 
 if __name__ == "__main__":
-    # bot 자동 실행
     threading.Thread(target=start_bot, daemon=True).start()
-
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
