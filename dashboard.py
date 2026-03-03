@@ -9,11 +9,14 @@ ARM_FILE = "armed.flag"
 app = Flask(__name__)
 
 
-def load(file):
-    if not os.path.exists(file):
-        return {}
-    with open(file, "r", encoding="utf-8") as f:
-        return json.load(f)
+def load_state():
+    if not os.path.exists(STATE_FILE):
+        return {"markets": {}, "message": "state.json 없음 - bot.py가 아직 안 돌고 있어요"}
+    try:
+        with open(STATE_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as e:
+        return {"markets": {}, "message": f"state.json 읽기 실패: {e}"}
 
 
 @app.route("/")
@@ -85,3 +88,4 @@ import os
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "8080"))
     app.run(host="0.0.0.0", port=port)
+
