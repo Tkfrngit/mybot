@@ -120,12 +120,6 @@ def json_view():
     return LATEST_STATE
 
 if __name__ == "__main__":
-    import subprocess
-    import threading
-
-    def run_bot():
-        subprocess.Popen(["python", "bot.py"])
-
-    threading.Thread(target=run_bot).start()
-
+    threading.Thread(target=start_bot).start()
     app.run(host="0.0.0.0", port=8080)
+
