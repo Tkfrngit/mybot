@@ -8,4 +8,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 EXPOSE 8080
 
-CMD python bot.py & python dashboard.py
+CMD sh -c "python bot.py & python dashboard.py"
