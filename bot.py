@@ -193,8 +193,16 @@ def upbit_private_post(path: str, query: dict):
     return SESSION.post(f"https://api.upbit.com{path}", params=query, headers=headers, timeout=10).json()
 
 
-def get_accounts() -> List[dict]:
-    return upbit_private_get("/v1/accounts")
+def get_accounts():
+    data = upbit_private_get("/v1/accounts")
+
+    if isinstance(data, dict) and "error" in data:
+        raise Exception(data["error"])
+
+    if isinstance(data, str):
+        raise Exception(data)
+
+    return data
 
 
 def order_buy_krw(market: str, krw_amount: int) -> dict:
@@ -554,3 +562,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
