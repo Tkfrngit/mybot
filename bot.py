@@ -53,7 +53,7 @@ SPLIT_BUY = int(os.getenv("SPLIT_BUY", "2"))
 SPLIT_SELL = int(os.getenv("SPLIT_SELL", "2"))
 
 # 기본 RSI + 볼린저
-RSI_BUY = float(os.getenv("RSI_BUY", "30"))
+RSI_BUY = float(os.getenv("RSI_BUY", "45"))
 RSI_SELL = float(os.getenv("RSI_SELL", "60"))
 BB_K = float(os.getenv("BB_K", "2.0"))
 
@@ -861,3 +861,4 @@ class TradingBot:
                 pnl = calc_pnl(positions)
                 save_state(f"❌ BOT ERROR: {e}", [], {}, {}, positions, risk, pnl, self.last_trade, self.last_error)
                 time.sleep(5)
+
