@@ -160,9 +160,15 @@ def get_server_ip():
         return f"Server Public IP: {ip}"
     except Exception as e:
         return f"IP 확인 실패: {e}"
-
+        
+@app.route("/upbit_ip")
+def upbit_ip():
+    import requests
+    r = requests.get("https://api.upbit.com/v1/market/all")
+    return str(r.headers)
 
 if __name__ == "__main__":
     start_bot_once()
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
+
