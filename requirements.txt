@@ -1,5 +1,5 @@
 flask
 requests
-numpy
 pyjwt
 gunicorn
+
