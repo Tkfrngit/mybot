@@ -34,37 +34,37 @@ LIVE_TRADING = os.getenv("LIVE_TRADING", "0").strip().lower() in ("1", "true", "
 PORT = int(os.getenv("PORT", "8080"))
 
 # 루프
-INTERVAL_SEC = int(os.getenv("INTERVAL_SEC", "10"))
+INTERVAL_SEC = int(os.getenv("INTERVAL_SEC", "8"))
 
 # 봉 설정
 CANDLE_MIN = int(os.getenv("CANDLE_MIN", "5"))
 CANDLE_COUNT = int(os.getenv("CANDLE_COUNT", "200"))
 
 # 자동선정 (스코어 상위)
-TOP_N = int(os.getenv("TOP_N", "8"))            # 후보 풀에서 상위 N개
-TRADE_UNIVERSE = int(os.getenv("TRADE_UNIVERSE", "25"))  # 1차 후보: 거래대금 상위 K개
+TOP_N = int(os.getenv("TOP_N", "12"))            # 후보 풀에서 상위 N개
+TRADE_UNIVERSE = int(os.getenv("TRADE_UNIVERSE", "40"))  # 1차 후보: 거래대금 상위 K개
 
 # 포지션/금액
 TRADE_KRW = int(os.getenv("TRADE_KRW", "10000"))
-MAX_POSITIONS = int(os.getenv("MAX_POSITIONS", "3"))
+MAX_POSITIONS = int(os.getenv("MAX_POSITIONS", "4"))
 
 # 분할
 SPLIT_BUY = int(os.getenv("SPLIT_BUY", "2"))
 SPLIT_SELL = int(os.getenv("SPLIT_SELL", "2"))
 
 # 기본 RSI + 볼린저
-RSI_BUY = float(os.getenv("RSI_BUY", "45"))
+RSI_BUY = float(os.getenv("RSI_BUY", "42"))
 RSI_SELL = float(os.getenv("RSI_SELL", "60"))
 BB_K = float(os.getenv("BB_K", "2.0"))
 
 # 고급 전략 필터
 TREND_SMA_FAST = int(os.getenv("TREND_SMA_FAST", "20"))   # 추세필터 fast
 TREND_SMA_SLOW = int(os.getenv("TREND_SMA_SLOW", "60"))   # 추세필터 slow
-VOLUME_RATIO_MIN = float(os.getenv("VOLUME_RATIO_MIN", "1.2"))  # 최근 거래량이 평균 대비 최소 배수
+VOLUME_RATIO_MIN = float(os.getenv("VOLUME_RATIO_MIN", "1.0"))  # 최근 거래량이 평균 대비 최소 배수
 MACD_CONFIRM = os.getenv("MACD_CONFIRM", "1").strip().lower() in ("1", "true", "yes", "y")
 
 # 손절/익절
-TAKE_PROFIT_PCT = float(os.getenv("TAKE_PROFIT_PCT", "3.0"))  # +3%
+TAKE_PROFIT_PCT = float(os.getenv("TAKE_PROFIT_PCT", "3.5"))  # +3%
 STOP_LOSS_PCT = float(os.getenv("STOP_LOSS_PCT", "2.0"))      # -2%
 
 # 재진입 쿨다운
@@ -414,7 +414,7 @@ def score_market(market: str) -> Tuple[float, dict]:
     if low is not None and mid is not None and up is not None:
         if p >= mid:
             score += 10
-        if p <= low * 1.01:
+        if p <= low * 1.05:
             score += 8
 
     # 4) 거래량 급증
@@ -495,7 +495,7 @@ def entry_signal(feats: dict) -> bool:
         return False
 
     # 기본 진입: 과매도 + 하단 근처
-    base = (r <= RSI_BUY) and (p <= low * 1.01)
+    base = (r <= RSI_BUY) and (p <= low * 1.05)
 
     # MACD 확인(옵션)
     if MACD_CONFIRM:
@@ -861,4 +861,5 @@ class TradingBot:
                 pnl = calc_pnl(positions)
                 save_state(f"❌ BOT ERROR: {e}", [], {}, {}, positions, risk, pnl, self.last_trade, self.last_error)
                 time.sleep(5)
+
 
